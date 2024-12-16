@@ -26,9 +26,9 @@ contract UniswapPositionManager {
   IUniswapV3Factory public uniswapFactory;
 
   uint256 private constant MINT_BURN_SLIPPAGE = 100; // 1%
-  // 1inch v4 exchange address
-  address private constant oneInchExchange =
-    0x1111111254fb6c44bAC0beD2854e76F90643097d;
+  // exchange router address
+  address private constant exchange =
+    0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE;
 
   constructor(
     INonfungiblePositionManager _nftManager,
@@ -49,7 +49,7 @@ contract UniswapPositionManager {
     int24 newTickUpper;
     uint256 minAmount0Staked;
     uint256 minAmount1Staked;
-    bytes oneInchData;
+    bytes swapData;
   }
 
   // Main position parameters
@@ -105,10 +105,10 @@ contract UniswapPositionManager {
     // burn current position NFT
     burn(params.positionId);
 
-    // swap using 1inch and stake all tokens in position after swap
-    if (params.oneInchData.length != 0) {
-      approveOneInch(token0, token1);
-      oneInchSwap(params.oneInchData);
+    // swap using external exchange and stake all tokens in position after swap
+    if (params.swapData.length != 0) {
+      approveSwap(token0, token1);
+      exchangeSwap(params.swapData);
     }
 
     approveNftManager(token0, token1);
@@ -304,17 +304,17 @@ contract UniswapPositionManager {
   }
 
   /* ========================================================================================= */
-  /*                               1inch Swap Helper functions                                 */
+  /*                               Swap Swap Helper functions                                 */
   /* ========================================================================================= */
 
   /**
-   * @dev Swap tokens in CLR (mining pool) using 1inch v4 exchange
-   * @param _oneInchData - One inch calldata, generated off-chain from their v4 api for the swap
+   * @dev Swap tokens in CLR (mining pool) using external swap
+   * @param _swapData - Swap calldata, generated off-chain
    */
-  function oneInchSwap(bytes memory _oneInchData) private {
-    (bool success, ) = oneInchExchange.call(_oneInchData);
+  function exchangeSwap(bytes memory _swapData) private {
+    (bool success, ) = exchange.call(_swapData);
 
-    require(success, "One inch swap call failed");
+    require(success, "Swap call failed");
   }
 
   /**
@@ -331,18 +331,18 @@ contract UniswapPositionManager {
   }
 
   /**
-   * Approve 1inch v4 for swaps
+   * Approve assets for swaps
    */
-  function approveOneInch(address token0, address token1) private {
+  function approveSwap(address token0, address token1) private {
     if (
-      IERC20(token0).allowance(address(this), address(oneInchExchange)) == 0
+      IERC20(token0).allowance(address(this), address(exchange)) == 0
     ) {
-      IERC20(token0).safeApprove(oneInchExchange, type(uint256).max);
+      IERC20(token0).safeApprove(exchange, type(uint256).max);
     }
     if (
-      IERC20(token1).allowance(address(this), address(oneInchExchange)) == 0
+      IERC20(token1).allowance(address(this), address(exchange)) == 0
     ) {
-      IERC20(token1).safeApprove(oneInchExchange, type(uint256).max);
+      IERC20(token1).safeApprove(exchange, type(uint256).max);
     }
   }
 
