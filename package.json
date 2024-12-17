@@ -2,7 +2,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "slither": "slither .",
-    "prettier": "prettier --write 'contracts/**/*.sol'"
+    "prettier": "prettier --write 'contracts/**/*.sol'",
+    "build": "hardhat compile"
   },
   "dependencies": {
     "@float-capital/solidity-coverage": "^0.7.17",
