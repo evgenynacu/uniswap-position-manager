@@ -2,17 +2,18 @@
 pragma solidity 0.7.6;
 pragma abicoder v2;
 
-import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
-import "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
+import "@openzeppelin/contracts/math/SafeMath.sol";
+import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
+import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
+
 import "@uniswap/v3-core/contracts/libraries/TickMath.sol";
+import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
 
-import "@openzeppelin/contracts/math/SafeMath.sol";
-import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
-
-import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@uniswap/v3-periphery/contracts/interfaces/IQuoter.sol";
+import "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 
 /**
  * Contract which manages an Uniswap V3 Position
@@ -24,18 +25,20 @@ contract UniswapPositionManager {
 
   INonfungiblePositionManager public nftManager;
   IUniswapV3Factory public uniswapFactory;
+  IQuoter public quoter;
 
   uint256 private constant MINT_BURN_SLIPPAGE = 100; // 1%
   // exchange router address
-  address private constant exchange =
-    0x1231DEB6f5749EF6cE6943a275A1D3E7486F4EaE;
+  address private constant exchange = 0x111111125421cA6dc452d289314280a0f8842A65;
 
   constructor(
     INonfungiblePositionManager _nftManager,
-    IUniswapV3Factory _uniswapFactory
+    IUniswapV3Factory _uniswapFactory,
+    IQuoter _quoter
   ) {
     nftManager = _nftManager;
     uniswapFactory = _uniswapFactory;
+    quoter = _quoter;
   }
 
   /* ========================================================================================= */
@@ -76,6 +79,12 @@ contract UniswapPositionManager {
     uint256 newStakedToken1Balance
   );
 
+  event PositionState(
+    uint256 token0Balance,
+    uint256 token1Balance,
+    uint256 value
+  );
+
   /* ========================================================================================= */
   /*                                        User-facing                                        */
   /* ========================================================================================= */
@@ -105,6 +114,8 @@ contract UniswapPositionManager {
     // burn current position NFT
     burn(params.positionId);
 
+    _emitState(positionParams);
+
     // swap using external exchange and stake all tokens in position after swap
     if (params.swapData.length != 0) {
       approveSwap(token0, token1);
@@ -112,6 +123,8 @@ contract UniswapPositionManager {
     }
 
     approveNftManager(token0, token1);
+
+    _emitState(positionParams);
 
     (uint256 amount0Minted, uint256 amount1Minted) = calculatePoolMintedAmounts(
       IERC20(token0).balanceOf(address(this)),
@@ -162,6 +175,13 @@ contract UniswapPositionManager {
       stakedToken0Balance,
       stakedToken1Balance
     );
+  }
+
+  function _emitState(PositionParams memory params) private {
+    uint256 token0Balance = IERC20(params.token0).balanceOf(address(this));
+    uint256 token1Balance = IERC20(params.token1).balanceOf(address(this));
+    uint256 totalValue = token1Balance + quoter.quoteExactInputSingle(params.token0, params.token1, params.fee, token0Balance, 0);
+    emit PositionState(token0Balance, token1Balance, totalValue);
   }
 
   /**

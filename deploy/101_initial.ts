@@ -14,12 +14,13 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 
 	let nftManagerAddress = uniswapAddresses.nonfungibleTokenPositionManagerAddress
 	let uniFactoryAddress = uniswapAddresses.v3CoreFactoryAddress
-	await deploy("UniswapPositionManager", {
+	let quoterAddress = uniswapAddresses.quoterAddress
+	const res = await deploy("UniswapPositionManager", {
 		from: deployer,
-		args: [nftManagerAddress, uniFactoryAddress]
+		args: [nftManagerAddress, uniFactoryAddress, quoterAddress]
 	})
 
-	await verifyContractWithArgs("0xd2c516C2312a02591d5546CE87B9e14C4Ec25DB2", nftManagerAddress, uniFactoryAddress)
+	await verifyContractWithArgs(res.address, nftManagerAddress, uniFactoryAddress, quoterAddress)
 }
 
 export default func
