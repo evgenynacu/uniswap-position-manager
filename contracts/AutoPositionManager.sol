@@ -24,13 +24,10 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
     event Repositioned(
         uint256 indexed oldPositionId,
         uint256 indexed newPositionId,
-        int24 oldLowerTick,
-        int24 oldUpperTick,
-        int24 newLowerTick,
-        int24 newUpperTick,
         uint256 startValue,
         uint256 endValue,
-        uint160 poolPrice
+        uint160 poolPrice,
+        int loss
     );
 
     // ----- Data Types ----- //
@@ -84,7 +81,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
     uint public maxShare;
     // Side of the pool which is used to value calculation
     Side public mainSide;
-    // maximal loss for every reposition operation (in terms of one of the tokens)
+    // maximal loss for every reposition operation (in terms of one of the tokens) - specified in 1/1000000
     int256 public maxLoss;
 
     // ----- state of the Vault ----- //
@@ -164,7 +161,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
     ) external override returns (bytes4) {
         require(_msgSender() == address(nftManager));
         require(from == _owner(), "Not owner!");
-        require(positionId == 0, "Initialized");
+        require(positionId == 0 || positionId == tokenId, "Initialized");
 
         positionId = tokenId;
 
@@ -195,13 +192,17 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         }
 
         (,, uint endValue) = _calculateValue(pool);
-        _verifyLoss(SafeCast.toInt256(startValue), SafeCast.toInt256(endValue));
+        int loss = _verifyLoss(SafeCast.toInt256(startValue), SafeCast.toInt256(endValue));
 
         _approveNftManager(pool);
         Position memory newPos = _estimateAndCreatePosition(pool, params);
         positionId = newPos.id;
 
-        emitRepositioned(pool.price, pos, newPos, startValue, endValue);
+        emitRepositioned(pool.price, pos, newPos, startValue, endValue, loss);
+    }
+
+    function setMaxLoss(int _maxLoss) external onlyOwner {
+        maxLoss = _maxLoss;
     }
 
     // ----- Helper functions ----- //
@@ -211,24 +212,22 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         Position memory pos,
         Position memory newPos,
         uint startValue,
-        uint endValue
+        uint endValue,
+        int loss
     ) internal {
         emit Repositioned(
             pos.id,
             newPos.id,
-            pos.tickLower,
-            pos.tickUpper,
-            newPos.tickLower,
-            newPos.tickUpper,
             startValue,
             endValue,
-            poolPrice
+            poolPrice,
+            loss
         );
     }
 
     function _verifyLoss(int256 startValue, int256 endValue) internal view returns (int256 loss) {
-        loss = (endValue - startValue) / startValue * 10000;
-        require(loss < maxLoss, "LossExceeds!");
+        loss = (startValue - endValue) / startValue * 1000000;
+        require(loss <= maxLoss, "LossExceeds!"); //todo check if this actually works
     }
 
     function _estimateAndCreatePosition(
@@ -274,7 +273,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
                 amount1Desired: amount1,
                 amount0Min: amount0.sub(amount0.div(MINT_BURN_SLIPPAGE)),
                 amount1Min: amount1.sub(amount1.div(MINT_BURN_SLIPPAGE)),
-                recipient: _msgSender(),
+                recipient: address(this),
                 deadline: block.timestamp
             })
         );
@@ -614,10 +613,26 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
 
     // ----- read state ----- //
 
-    function readState() external view returns (Position memory pos, Pool memory pool, uint decimals0, uint decimals1) {
+    function readState() external view returns (Position memory pos, Pool memory pool, uint decimals0, uint decimals1, uint staked0, uint staked1) {
         pos = readPosition(positionId);
         pool = _readPool(pos);
         decimals0 = ERC20(pool.token0).decimals();
         decimals1 = ERC20(pool.token1).decimals();
+
+        (staked0, staked1) = _getStakedTokenBalances(pool.price, pos);
+    }
+
+    /**
+      * @notice Get token balances in the position
+      */
+    function _getStakedTokenBalances(
+        uint160 poolPrice,
+        Position memory pos
+    ) internal pure returns (uint256 amount0, uint256 amount1) {
+        (amount0, amount1) = getAmountsForLiquidity(
+            pos.liquidity,
+            poolPrice,
+            pos
+        );
     }
 }
