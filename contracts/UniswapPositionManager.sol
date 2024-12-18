@@ -109,24 +109,24 @@ contract UniswapPositionManager {
     Pool memory pool = _readPool(pos);
 
     // withdraw entire liquidity from the position
-    withdrawAll(pool, pos);
+    _withdrawPositionWithFees(pool, pos);
     // burn current position NFT
-    burn(params.positionId);
+    _burn(params.positionId);
 
     _emitState(pool);
 
     // swap using external exchange and stake all tokens in position after swap
     if (params.swapData.length != 0) {
-      approveSwap(pool);
-      exchangeSwap(params.swapData);
+      _approveSwap(pool);
+      _exchangeSwap(params.swapData);
 
+      //re-read price as it can change after the swap
       pool.price = getPoolPriceFromAddress(pool.id);
     }
 
-    approveNftManager(pool);
-
     _emitState(pool);
 
+    _approveNftManager(pool);
     Position memory newPos = _estimateAndCreatePosition(pool, params);
 
     _returnChange(pool);
@@ -231,15 +231,12 @@ contract UniswapPositionManager {
   /**
    * @dev Withdraws all current liquidity from the position
    */
-  function withdrawAll(
+  function _withdrawPositionWithFees(
     Pool memory pool,
     Position memory pos
   ) private returns (uint256 _amount0, uint256 _amount1) {
-    // Collect fees
-    collect(pos.id);
-    (_amount0, _amount1) = unstakePosition(pool, pos);
-    collectPosition(uint128(_amount0), uint128(_amount1), pos.id);
-    //todo simplify. why we need several times to collect here?
+    (_amount0, _amount1) = _withdrawPositionFully(pool, pos);
+    _collectFees(type(uint128).max, type(uint128).max, pos.id);
   }
 
   /**
@@ -247,7 +244,7 @@ contract UniswapPositionManager {
    * @return amount0 token0 amount unstaked
    * @return amount1 token1 amount unstaked
    */
-  function unstakePosition(
+  function _withdrawPositionFully(
     Pool memory pool,
     Position memory pos
   ) private returns (uint256 amount0, uint256 amount1) {
@@ -296,22 +293,9 @@ contract UniswapPositionManager {
   }
 
   /**
-   * @notice Collect fees generated from position
-   */
-  function collect(
-    uint256 positionId
-  ) private returns (uint256 collected0, uint256 collected1) {
-    (collected0, collected1) = collectPosition(
-      type(uint128).max,
-      type(uint128).max,
-      positionId
-    );
-  }
-
-  /**
    *  @dev Collect token amounts from pool position
    */
-  function collectPosition(
+  function _collectFees(
     uint128 amount0,
     uint128 amount1,
     uint256 positionId
@@ -330,7 +314,7 @@ contract UniswapPositionManager {
    * @dev burn NFT representing a pool position with tokenId
    * @dev uses NFT Position Manager
    */
-  function burn(uint256 tokenId) private {
+  function _burn(uint256 tokenId) private {
     nftManager.burn(tokenId);
   }
 
@@ -371,7 +355,7 @@ contract UniswapPositionManager {
    * @dev Swap tokens in CLR (mining pool) using external swap
    * @param _swapData - Swap calldata, generated off-chain
    */
-  function exchangeSwap(bytes memory _swapData) private {
+  function _exchangeSwap(bytes memory _swapData) private {
     (bool success, ) = exchange.call(_swapData);
 
     require(success, "Swap call failed");
@@ -380,7 +364,7 @@ contract UniswapPositionManager {
   /**
    * Approve NFT Manager for deposits
    */
-  function approveNftManager(Pool memory pool) private {
+  function _approveNftManager(Pool memory pool) private {
     if (IERC20(pool.token0).allowance(address(this), address(nftManager)) == 0) {
       IERC20(pool.token0).safeApprove(address(nftManager), type(uint256).max);
     }
@@ -393,7 +377,7 @@ contract UniswapPositionManager {
   /**
    * Approve assets for swaps
    */
-  function approveSwap(Pool memory pool) private {
+  function _approveSwap(Pool memory pool) private {
     if (
       IERC20(pool.token0).allowance(address(this), address(exchange)) == 0
     ) {
