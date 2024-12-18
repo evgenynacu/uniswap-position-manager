@@ -55,13 +55,17 @@ contract UniswapPositionManager {
     bytes swapData;
   }
 
+  //todo add Pool struct to make it more readable
+
   // Main position parameters
-  struct PositionParams {
+  struct Position {
+    uint256 id;
     address token0;
     address token1;
     uint24 fee;
     int24 tickLower;
     int24 tickUpper;
+    uint128 liquidity;
   }
 
   /* ========================================================================================= */
@@ -94,71 +98,62 @@ contract UniswapPositionManager {
    * @param params Reposition parameter structure
    */
   function reposition(RepositionParams calldata params) public {
-    PositionParams memory positionParams = getPositionParams(params.positionId);
+    Position memory pos = readPosition(params.positionId);
     require(
       nftManager.ownerOf(params.positionId) == msg.sender,
       "Caller must own position"
     );
     require(
-      params.newTickLower != positionParams.tickLower ||
-        params.newTickUpper != positionParams.tickUpper,
+      params.newTickLower != pos.tickLower ||
+        params.newTickUpper != pos.tickUpper,
       "Need to change ticks"
     );
 
-    address token0 = positionParams.token0;
-    address token1 = positionParams.token1;
-    address poolAddress = getPoolAddress(params.positionId);
+    address poolAddress = getPoolAddress(pos);
+    uint160 poolPrice = getPoolPriceFromAddress(poolAddress);
 
     // withdraw entire liquidity from the position
-    withdrawAll(params.positionId);
+    withdrawAll(poolPrice, pos);
     // burn current position NFT
     burn(params.positionId);
 
-    _emitState(positionParams);
+    _emitState(pos);
 
     // swap using external exchange and stake all tokens in position after swap
     if (params.swapData.length != 0) {
-      approveSwap(token0, token1);
+      approveSwap(pos);
       exchangeSwap(params.swapData);
+
+      poolPrice = getPoolPriceFromAddress(poolAddress);
     }
 
-    approveNftManager(token0, token1);
+    approveNftManager(pos);
 
-    _emitState(positionParams);
+    _emitState(pos);
 
     (uint256 amount0Minted, uint256 amount1Minted) = calculatePoolMintedAmounts(
-      IERC20(token0).balanceOf(address(this)),
-      IERC20(token1).balanceOf(address(this)),
-      getPoolPriceFromAddress(poolAddress),
+      IERC20(pos.token0).balanceOf(address(this)),
+      IERC20(pos.token1).balanceOf(address(this)),
+      poolPrice,
       getPriceFromTick(params.newTickLower),
       getPriceFromTick(params.newTickUpper)
     );
 
-    uint256 newPositionId = createPosition(
+    Position memory newPos = createPosition(
       amount0Minted,
       amount1Minted,
-      token0,
-      token1,
-      positionParams.fee,
+      pos,
       params.newTickLower,
       params.newTickUpper
     );
 
-    // Return balance not sent to user
-    IERC20(token0).safeTransfer(
-      msg.sender,
-      IERC20(token0).balanceOf(address(this))
-    );
-    IERC20(token1).safeTransfer(
-      msg.sender,
-      IERC20(token1).balanceOf(address(this))
-    );
+    _returnChange(pos);
 
     // Check if balances meet min threshold
     (
       uint256 stakedToken0Balance,
       uint256 stakedToken1Balance
-    ) = getStakedTokenBalance(newPositionId);
+    ) = getStakedTokenBalances(poolPrice, newPos);
     require(
       params.minAmount0Staked <= stakedToken0Balance &&
         params.minAmount1Staked <= stakedToken1Balance,
@@ -167,9 +162,9 @@ contract UniswapPositionManager {
 
     emit Repositioned(
       params.positionId,
-      newPositionId,
-      positionParams.tickLower,
-      positionParams.tickUpper,
+      newPos.id,
+      pos.tickLower,
+      pos.tickUpper,
       params.newTickLower,
       params.newTickUpper,
       stakedToken0Balance,
@@ -177,46 +172,62 @@ contract UniswapPositionManager {
     );
   }
 
-  function _emitState(PositionParams memory params) private {
-    uint256 token0Balance = IERC20(params.token0).balanceOf(address(this));
-    uint256 token1Balance = IERC20(params.token1).balanceOf(address(this));
-    uint256 totalValue = token1Balance + quoter.quoteExactInputSingle(params.token0, params.token1, params.fee, token0Balance, 0);
-    emit PositionState(token0Balance, token1Balance, totalValue);
+  function _emitState(Position memory pos) private {
+    uint256 token0Balance = IERC20(pos.token0).balanceOf(address(this));
+    uint256 token1Balance = IERC20(pos.token1).balanceOf(address(this));
+    if (token0Balance == 0) {
+      emit PositionState(token0Balance, token1Balance, token1Balance);
+    } else {
+      uint256 totalValue = token1Balance + quoter.quoteExactInputSingle(pos.token0, pos.token1, pos.fee, token0Balance, 0);
+      emit PositionState(token0Balance, token1Balance, totalValue);
+    }
+  }
+
+  /**
+   * @dev Returns tokens left on the contract balance to the caller
+   */
+  function _returnChange(Position memory pos) internal {
+    // Return balance not sent to user
+    IERC20(pos.token0).safeTransfer(
+      msg.sender,
+      IERC20(pos.token0).balanceOf(address(this))
+    );
+    IERC20(pos.token1).safeTransfer(
+      msg.sender,
+      IERC20(pos.token1).balanceOf(address(this))
+    );
   }
 
   /**
    * @dev Withdraws all current liquidity from the position
    */
   function withdrawAll(
-    uint256 positionId
+    uint160 poolPrice,
+    Position memory pos
   ) private returns (uint256 _amount0, uint256 _amount1) {
     // Collect fees
-    collect(positionId);
-    (_amount0, _amount1) = unstakePosition(
-      getPositionLiquidity(positionId),
-      positionId
-    );
-    collectPosition(uint128(_amount0), uint128(_amount1), positionId);
+    collect(pos.id);
+    (_amount0, _amount1) = unstakePosition(poolPrice, pos);
+    collectPosition(uint128(_amount0), uint128(_amount1), pos.id);
+    //todo simplify. why we need several times to collect here?
   }
 
   /**
-   * @dev Unstakes a given amount of liquidity from the Uni V3 position
-   * @param liquidity amount of liquidity to unstake
+   * @dev Removes all liquidity from the Uni V3 position
    * @return amount0 token0 amount unstaked
    * @return amount1 token1 amount unstaked
    */
   function unstakePosition(
-    uint128 liquidity,
-    uint256 positionId
+    uint160 poolPrice,
+    Position memory pos
   ) private returns (uint256 amount0, uint256 amount1) {
-    (uint256 _amount0, uint256 _amount1) = getAmountsForLiquidity(
-      liquidity,
-      positionId
-    );
+    // calculate amounts to withdraw
+    (uint256 _amount0, uint256 _amount1) = getAmountsForLiquidity(pos.liquidity, poolPrice, pos);
+    // withdraw liquidity
     (amount0, amount1) = nftManager.decreaseLiquidity(
       INonfungiblePositionManager.DecreaseLiquidityParams({
-        tokenId: positionId,
-        liquidity: liquidity,
+        tokenId: pos.id,
+        liquidity: pos.liquidity,
         amount0Min: _amount0,
         amount1Min: _amount1,
         deadline: block.timestamp
@@ -297,20 +308,19 @@ contract UniswapPositionManager {
    * @dev Creates the NFT token representing the pool position
    * @dev Mint initial liquidity
    */
+  //todo replace Position with Pool
   function createPosition(
     uint256 amount0,
     uint256 amount1,
-    address token0,
-    address token1,
-    uint24 poolFee,
+    Position memory pos,
     int24 newTickLower,
     int24 newTickUpper
-  ) private returns (uint256 _tokenId) {
-    (_tokenId, , , ) = nftManager.mint(
+  ) private returns (Position memory) {
+    (uint _tokenId, , , ) = nftManager.mint(
       INonfungiblePositionManager.MintParams({
-        token0: token0,
-        token1: token1,
-        fee: poolFee,
+        token0: pos.token0,
+        token1: pos.token1,
+        fee: pos.fee,
         tickLower: newTickLower,
         tickUpper: newTickUpper,
         amount0Desired: amount0,
@@ -321,6 +331,7 @@ contract UniswapPositionManager {
         deadline: block.timestamp
       })
     );
+    return readPosition(_tokenId);
   }
 
   /* ========================================================================================= */
@@ -340,29 +351,31 @@ contract UniswapPositionManager {
   /**
    * Approve NFT Manager for deposits
    */
-  function approveNftManager(address token0, address token1) private {
-    if (IERC20(token0).allowance(address(this), address(nftManager)) == 0) {
-      IERC20(token0).safeApprove(address(nftManager), type(uint256).max);
+  //todo replace with Pool
+  function approveNftManager(Position memory pos) private {
+    if (IERC20(pos.token0).allowance(address(this), address(nftManager)) == 0) {
+      IERC20(pos.token0).safeApprove(address(nftManager), type(uint256).max);
     }
 
-    if (IERC20(token1).allowance(address(this), address(nftManager)) == 0) {
-      IERC20(token1).safeApprove(address(nftManager), type(uint256).max);
+    if (IERC20(pos.token1).allowance(address(this), address(nftManager)) == 0) {
+      IERC20(pos.token1).safeApprove(address(nftManager), type(uint256).max);
     }
   }
 
   /**
    * Approve assets for swaps
    */
-  function approveSwap(address token0, address token1) private {
+  //todo replace with Pool
+  function approveSwap(Position memory pos) private {
     if (
-      IERC20(token0).allowance(address(this), address(exchange)) == 0
+      IERC20(pos.token0).allowance(address(this), address(exchange)) == 0
     ) {
-      IERC20(token0).safeApprove(exchange, type(uint256).max);
+      IERC20(pos.token0).safeApprove(exchange, type(uint256).max);
     }
     if (
-      IERC20(token1).allowance(address(this), address(exchange)) == 0
+      IERC20(pos.token1).allowance(address(this), address(exchange)) == 0
     ) {
-      IERC20(token1).safeApprove(exchange, type(uint256).max);
+      IERC20(pos.token1).safeApprove(exchange, type(uint256).max);
     }
   }
 
@@ -375,10 +388,23 @@ contract UniswapPositionManager {
    */
   function getStakedTokenBalance(
     uint256 positionId
-  ) public view returns (uint256 amount0, uint256 amount1) {
+  ) external view returns (uint256 amount0, uint256 amount1) {
+    Position memory pos = readPosition(positionId);
+    uint160 poolPrice = getPoolPriceFromAddress(getPoolAddress(pos));
+    (amount0, amount1) = getStakedTokenBalances(poolPrice, pos);
+  }
+
+  /**
+   * @notice Get token balances in the position
+   */
+  function getStakedTokenBalances(
+    uint160 poolPrice,
+    Position memory pos
+  ) internal view returns (uint256 amount0, uint256 amount1) {
     (amount0, amount1) = getAmountsForLiquidity(
-      getPositionLiquidity(positionId),
-      positionId
+      pos.liquidity,
+      poolPrice,
+      pos
     );
   }
 
@@ -393,7 +419,7 @@ contract UniswapPositionManager {
     uint160 poolPrice,
     uint160 priceLower,
     uint160 priceUpper
-  ) public view returns (uint256 amount0Minted, uint256 amount1Minted) {
+  ) public pure returns (uint256 amount0Minted, uint256 amount1Minted) {
     uint128 liquidityAmount = getLiquidityForAmounts(
       amount0,
       amount1,
@@ -410,67 +436,6 @@ contract UniswapPositionManager {
   }
 
   /**
-   * @dev Calculates single-side minted amount
-   * @dev Takes an asset and amount and returns
-   * @dev the amounts to deposit in the pool in the correct ratio
-   * @param inputAsset - use token0 if 0, token1 else
-   * @param amount - amount to deposit/withdraw
-   * @param positionId - nft id of the position
-   */
-  function calculateAmountsMintedSingleToken(
-    uint8 inputAsset,
-    uint256 amount,
-    uint256 positionId
-  ) public view returns (uint256 amount0Minted, uint256 amount1Minted) {
-    uint160 poolPrice = getPoolPrice(positionId);
-    (int24 tickLower, int24 tickUpper) = getTicks(positionId);
-    uint160 priceLower = getPriceFromTick(tickLower);
-    uint160 priceUpper = getPriceFromTick(tickUpper);
-    uint128 liquidityAmount;
-
-    // In case the pool is out of range
-    if (poolPrice < priceLower) {
-      liquidityAmount = getLiquidityForAmount0(priceLower, priceUpper, amount);
-    } else if (poolPrice > priceUpper) {
-      liquidityAmount = getLiquidityForAmount1(priceLower, priceUpper, amount);
-    } else {
-      if (inputAsset == 0) {
-        liquidityAmount = getLiquidityForAmount0(poolPrice, priceUpper, amount);
-      } else {
-        liquidityAmount = getLiquidityForAmount1(priceLower, poolPrice, amount);
-      }
-    }
-    (amount0Minted, amount1Minted) = getAmountsForLiquidity(
-      liquidityAmount,
-      positionId
-    );
-  }
-
-  function getLiquidityForAmount0(
-    uint160 priceLower,
-    uint160 priceUpper,
-    uint256 amount0
-  ) public pure returns (uint128 liquidity) {
-    liquidity = LiquidityAmounts.getLiquidityForAmount0(
-      priceLower,
-      priceUpper,
-      amount0
-    );
-  }
-
-  function getLiquidityForAmount1(
-    uint160 priceLower,
-    uint160 priceUpper,
-    uint256 amount1
-  ) public pure returns (uint128 liquidity) {
-    liquidity = LiquidityAmounts.getLiquidityForAmount1(
-      priceLower,
-      priceUpper,
-      amount1
-    );
-  }
-
-  /**
    * @dev Calculate pool liquidity for given token amounts
    */
   function getLiquidityForAmounts(
@@ -479,7 +444,7 @@ contract UniswapPositionManager {
     uint160 poolPrice,
     uint160 priceLower,
     uint160 priceUpper
-  ) public view returns (uint128 liquidity) {
+  ) public pure returns (uint128 liquidity) {
     liquidity = LiquidityAmounts.getLiquidityForAmounts(
       poolPrice,
       priceLower,
@@ -490,36 +455,18 @@ contract UniswapPositionManager {
   }
 
   /**
-   * @dev Calculate pool liquidity for given token amounts
-   */
-  function getLiquidityForAmounts(
-    uint256 amount0,
-    uint256 amount1,
-    uint256 positionId
-  ) public view returns (uint128 liquidity) {
-    (int24 tickLower, int24 tickUpper) = getTicks(positionId);
-    liquidity = LiquidityAmounts.getLiquidityForAmounts(
-      getPoolPrice(positionId),
-      getPriceFromTick(tickLower),
-      getPriceFromTick(tickUpper),
-      amount0,
-      amount1
-    );
-  }
-
-  /**
    * @dev Calculate token amounts for given pool liquidity
    */
   function getAmountsForLiquidity(
     uint128 liquidity,
-    uint256 positionId
-  ) public view returns (uint256 amount0, uint256 amount1) {
-    (int24 tickLower, int24 tickUpper) = getTicks(positionId);
-    (amount0, amount1) = LiquidityAmounts.getAmountsForLiquidity(
-      getPoolPrice(positionId),
-      getPriceFromTick(tickLower),
-      getPriceFromTick(tickUpper),
-      liquidity
+    uint160 poolPrice,
+    Position memory pos
+  ) public pure returns (uint256 amount0, uint256 amount1) {
+    (amount0, amount1) = getAmountsForLiquidity(
+      liquidity,
+      poolPrice,
+      getPriceFromTick(pos.tickLower),
+      getPriceFromTick(pos.tickUpper)
     );
   }
 
@@ -531,7 +478,7 @@ contract UniswapPositionManager {
     uint160 poolPrice,
     uint160 priceLower,
     uint160 priceUpper
-  ) public view returns (uint256 amount0, uint256 amount1) {
+  ) public pure returns (uint256 amount0, uint256 amount1) {
     (amount0, amount1) = LiquidityAmounts.getAmountsForLiquidity(
       poolPrice,
       priceLower,
@@ -548,30 +495,13 @@ contract UniswapPositionManager {
   }
 
   /**
-   * @dev get tick from price
-   */
-  function getTickFromPrice(uint160 price) public pure returns (int24) {
-    return TickMath.getTickAtSqrtRatio(price);
-  }
-
-  /**
    * @dev Get a pool's price from position id
    * @param positionId the position id
    */
   function getPoolPrice(
     uint256 positionId
-  ) public view returns (uint160 price) {
-    return getPoolPriceFromAddress(getPoolAddress(positionId));
-  }
-
-  /**
-   * @dev Get a pool's liquidity from position id
-   * @param positionId the position id
-   */
-  function getPoolLiquidity(
-    uint256 positionId
-  ) public view returns (uint160 price) {
-    return getPoolLiquidityFromAddress(getPoolAddress(positionId));
+  ) external view returns (uint160 price) {
+    return getPoolPriceFromAddress(getPoolAddress(readPosition(positionId)));
   }
 
   /**
@@ -586,110 +516,23 @@ contract UniswapPositionManager {
     return sqrtRatioX96;
   }
 
-  /**
-   * @dev Returns the current pool liquidity
-   */
-  function getPoolLiquidityFromAddress(
-    address _pool
-  ) public view returns (uint128) {
-    IUniswapV3Pool pool = IUniswapV3Pool(_pool);
-    return pool.liquidity();
-  }
-
-  /**
-   * Get pool price in decimal notation with 12 decimals
-   */
-  function getPoolPriceWithDecimals(
-    uint256 positionId,
-    uint8 token0Decimals,
-    uint8 token1Decimals
-  ) public view returns (uint256 price) {
-    uint160 sqrtRatioX96 = getPoolPrice(positionId);
-    uint8 tokenDecimalDiff = token0Decimals >= token1Decimals
-      ? token0Decimals - token1Decimals
-      : token1Decimals - token0Decimals;
-    return
-      token0Decimals >= token1Decimals
-        ? (uint256(sqrtRatioX96).mul(uint256(sqrtRatioX96)).mul(
-          10 ** (12 + tokenDecimalDiff)
-        ) >> 192)
-        : (uint256(sqrtRatioX96).mul(uint256(sqrtRatioX96)).mul(
-          10 ** (12 - tokenDecimalDiff)
-        ) >> 192);
-  }
-
   /* ========================================================================================= */
   /*                               Uni V3 NFT Manager Helper functions                         */
   /* ========================================================================================= */
 
-  /**
-   * @dev Returns a position's liquidity
-   * @param positionId the nft id of the position
-   */
-  function getPositionLiquidity(
-    uint256 positionId
-  ) public view returns (uint128 liquidity) {
-    (, , , , , , , liquidity, , , , ) = nftManager.positions(positionId);
-  }
-
-  /**
-   * @dev Returns a position's fee
-   * @param positionId the nft id of the position
-   */
-  function getFee(uint256 positionId) public view returns (uint24 fee) {
-    (, , , , fee, , , , , , , ) = nftManager.positions(positionId);
-  }
-
-  /**
-   * @dev Returns a position's lower and upper ticks
-   * @param positionId the nft id of the position
-   */
-  function getTicks(
-    uint256 positionId
-  ) public view returns (int24 tickLower, int24 tickUpper) {
-    (, , , , , tickLower, tickUpper, , , , , ) = nftManager.positions(
-      positionId
-    );
-  }
-
-  /**
-   * @dev Returns a position's lower and upper prices (the price range of the position)
-   * @param positionId the nft id of the position
-   */
-  function getPriceRange(
-    uint256 positionId
-  ) public view returns (uint160 priceLower, uint160 priceUpper) {
-    (, , , , , int24 tickLower, int24 tickUpper, , , , , ) = nftManager
-      .positions(positionId);
-    priceLower = getPriceFromTick(tickLower);
-    priceUpper = getPriceFromTick(tickUpper);
-  }
-
   function getPoolAddress(
-    uint256 positionId
+    Position memory pos
   ) public view returns (address pool) {
-    (, , address token0, address token1, uint24 fee, , , , , , , ) = nftManager
-      .positions(positionId);
-    pool = uniswapFactory.getPool(token0, token1, fee);
-  }
-
-  /**
-   * @dev Returns a position's token 0 and token 1 addresses
-   * @param positionId the nft id of the position
-   */
-  function getTokens(
-    uint256 positionId
-  ) public view returns (address token0, address token1) {
-    (, , token0, token1, , , , , , , , ) = nftManager.positions(positionId);
+    return uniswapFactory.getPool(pos.token0, pos.token1, pos.fee);
   }
 
   /**
    * @dev Returns the parameters needed for reposition function
    * @param positionId the nft id of the position
    */
-  function getPositionParams(
+  function readPosition(
     uint256 positionId
-  ) public view returns (PositionParams memory positionParams) {
+  ) public view returns (Position memory) {
     (
       ,
       ,
@@ -698,19 +541,21 @@ contract UniswapPositionManager {
       uint24 fee,
       int24 tickLower,
       int24 tickUpper,
-      ,
+      uint128 liquidity,
       ,
       ,
       ,
 
     ) = nftManager.positions(positionId);
     return
-      PositionParams({
+      Position({
+        id: positionId,
         token0: token0,
         token1: token1,
         fee: fee,
         tickLower: tickLower,
-        tickUpper: tickUpper
+        tickUpper: tickUpper,
+        liquidity: liquidity
       });
   }
 }
