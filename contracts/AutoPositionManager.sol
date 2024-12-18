@@ -3,6 +3,7 @@ pragma solidity 0.7.6;
 pragma abicoder v2;
 
 import "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
+import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/SafeERC20.sol";
 import "@openzeppelin/contracts/token/ERC721/IERC721Receiver.sol";
@@ -502,12 +503,12 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
 
     /**
       * @dev Get a pool's price from position id
-      * @param positionId the position id
+      * @param _positionId the position id
       */
     function getPoolPrice(
-        uint256 positionId
+        uint256 _positionId
     ) external view returns (uint160 price) {
-        return getPoolPriceFromAddress(getPoolAddress(readPosition(positionId)));
+        return getPoolPriceFromAddress(getPoolAddress(readPosition(_positionId)));
     }
 
     /**
@@ -611,4 +612,12 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         emit OwnershipTransferred(previousOwner, newOwner);
     }
 
+    // ----- read state ----- //
+
+    function readState() external view returns (Position memory pos, Pool memory pool, uint decimals0, uint decimals1) {
+        pos = readPosition(positionId);
+        pool = _readPool(pos);
+        decimals0 = ERC20(pool.token0).decimals();
+        decimals1 = ERC20(pool.token1).decimals();
+    }
 }
