@@ -55,7 +55,13 @@ contract UniswapPositionManager {
     bytes swapData;
   }
 
-  //todo add Pool struct to make it more readable
+  struct Pool {
+    address id;
+    address token0;
+    address token1;
+    uint24 fee;
+    uint160 price;
+  }
 
   // Main position parameters
   struct Position {
@@ -99,66 +105,34 @@ contract UniswapPositionManager {
    */
   function reposition(RepositionParams calldata params) public {
     Position memory pos = readPosition(params.positionId);
-    require(
-      nftManager.ownerOf(params.positionId) == msg.sender,
-      "Caller must own position"
-    );
-    require(
-      params.newTickLower != pos.tickLower ||
-        params.newTickUpper != pos.tickUpper,
-      "Need to change ticks"
-    );
-
-    address poolAddress = getPoolAddress(pos);
-    uint160 poolPrice = getPoolPriceFromAddress(poolAddress);
+    _verifyPositionAndParams(params, pos);
+    Pool memory pool = _readPool(pos);
 
     // withdraw entire liquidity from the position
-    withdrawAll(poolPrice, pos);
+    withdrawAll(pool, pos);
     // burn current position NFT
     burn(params.positionId);
 
-    _emitState(pos);
+    _emitState(pool);
 
     // swap using external exchange and stake all tokens in position after swap
     if (params.swapData.length != 0) {
-      approveSwap(pos);
+      approveSwap(pool);
       exchangeSwap(params.swapData);
 
-      poolPrice = getPoolPriceFromAddress(poolAddress);
+      pool.price = getPoolPriceFromAddress(pool.id);
     }
 
-    approveNftManager(pos);
+    approveNftManager(pool);
 
-    _emitState(pos);
+    _emitState(pool);
 
-    (uint256 amount0Minted, uint256 amount1Minted) = calculatePoolMintedAmounts(
-      IERC20(pos.token0).balanceOf(address(this)),
-      IERC20(pos.token1).balanceOf(address(this)),
-      poolPrice,
-      getPriceFromTick(params.newTickLower),
-      getPriceFromTick(params.newTickUpper)
-    );
+    Position memory newPos = _estimateAndCreatePosition(pool, params);
 
-    Position memory newPos = createPosition(
-      amount0Minted,
-      amount1Minted,
-      pos,
-      params.newTickLower,
-      params.newTickUpper
-    );
+    _returnChange(pool);
 
-    _returnChange(pos);
-
-    // Check if balances meet min threshold
-    (
-      uint256 stakedToken0Balance,
-      uint256 stakedToken1Balance
-    ) = getStakedTokenBalances(poolPrice, newPos);
-    require(
-      params.minAmount0Staked <= stakedToken0Balance &&
-        params.minAmount1Staked <= stakedToken1Balance,
-      "Staked amounts after rebalance are insufficient"
-    );
+    (uint stakedToken0Balance, uint stakedToken1Balance) =
+            _verifyStakedEnough(params, pool.price, newPos);
 
     emit Repositioned(
       params.positionId,
@@ -172,13 +146,69 @@ contract UniswapPositionManager {
     );
   }
 
-  function _emitState(Position memory pos) private {
-    uint256 token0Balance = IERC20(pos.token0).balanceOf(address(this));
-    uint256 token1Balance = IERC20(pos.token1).balanceOf(address(this));
+  function _readPool(Position memory pos) internal view returns (Pool memory pool) {
+    address poolAddress = getPoolAddress(pos);
+    pool = Pool({
+      id: poolAddress,
+      token0: pos.token0,
+      token1: pos.token1,
+      fee: pos.fee,
+      price: getPoolPriceFromAddress(poolAddress)
+    });
+  }
+
+  function _verifyPositionAndParams(RepositionParams memory params, Position memory pos) internal view {
+    require(
+      nftManager.ownerOf(params.positionId) == msg.sender,
+      "Caller must own position"
+    );
+    require(
+      params.newTickLower != pos.tickLower ||
+      params.newTickUpper != pos.tickUpper,
+      "Need to change ticks"
+    );
+  }
+
+  function _verifyStakedEnough(
+    RepositionParams memory params, uint160 poolPrice, Position memory newPos
+  ) internal pure returns (uint stakedToken0Balance, uint stakedToken1Balance) {
+    // Check if balances meet min threshold
+    (stakedToken0Balance, stakedToken1Balance) = getStakedTokenBalances(poolPrice, newPos);
+    require(
+      params.minAmount0Staked <= stakedToken0Balance &&
+      params.minAmount1Staked <= stakedToken1Balance,
+      "Staked amounts after rebalance are insufficient"
+    );
+  }
+
+  function _estimateAndCreatePosition(
+    Pool memory pool,
+    RepositionParams memory params
+  ) internal returns (Position memory newPos) {
+    (uint256 amount0Minted, uint256 amount1Minted) = calculatePoolMintedAmounts(
+      IERC20(pool.token0).balanceOf(address(this)),
+      IERC20(pool.token1).balanceOf(address(this)),
+      pool.price,
+      getPriceFromTick(params.newTickLower),
+      getPriceFromTick(params.newTickUpper)
+    );
+
+    newPos = createPosition(
+      amount0Minted,
+      amount1Minted,
+      pool,
+      params.newTickLower,
+      params.newTickUpper
+    );
+  }
+
+  function _emitState(Pool memory pool) private {
+    uint256 token0Balance = IERC20(pool.token0).balanceOf(address(this));
+    uint256 token1Balance = IERC20(pool.token1).balanceOf(address(this));
     if (token0Balance == 0) {
       emit PositionState(token0Balance, token1Balance, token1Balance);
     } else {
-      uint256 totalValue = token1Balance + quoter.quoteExactInputSingle(pos.token0, pos.token1, pos.fee, token0Balance, 0);
+      uint256 totalValue = token1Balance + quoter.quoteExactInputSingle(pool.token0, pool.token1, pool.fee, token0Balance, 0);
       emit PositionState(token0Balance, token1Balance, totalValue);
     }
   }
@@ -186,15 +216,15 @@ contract UniswapPositionManager {
   /**
    * @dev Returns tokens left on the contract balance to the caller
    */
-  function _returnChange(Position memory pos) internal {
+  function _returnChange(Pool memory pool) internal {
     // Return balance not sent to user
-    IERC20(pos.token0).safeTransfer(
+    IERC20(pool.token0).safeTransfer(
       msg.sender,
-      IERC20(pos.token0).balanceOf(address(this))
+      IERC20(pool.token0).balanceOf(address(this))
     );
-    IERC20(pos.token1).safeTransfer(
+    IERC20(pool.token1).safeTransfer(
       msg.sender,
-      IERC20(pos.token1).balanceOf(address(this))
+      IERC20(pool.token1).balanceOf(address(this))
     );
   }
 
@@ -202,12 +232,12 @@ contract UniswapPositionManager {
    * @dev Withdraws all current liquidity from the position
    */
   function withdrawAll(
-    uint160 poolPrice,
+    Pool memory pool,
     Position memory pos
   ) private returns (uint256 _amount0, uint256 _amount1) {
     // Collect fees
     collect(pos.id);
-    (_amount0, _amount1) = unstakePosition(poolPrice, pos);
+    (_amount0, _amount1) = unstakePosition(pool, pos);
     collectPosition(uint128(_amount0), uint128(_amount1), pos.id);
     //todo simplify. why we need several times to collect here?
   }
@@ -218,11 +248,11 @@ contract UniswapPositionManager {
    * @return amount1 token1 amount unstaked
    */
   function unstakePosition(
-    uint160 poolPrice,
+    Pool memory pool,
     Position memory pos
   ) private returns (uint256 amount0, uint256 amount1) {
     // calculate amounts to withdraw
-    (uint256 _amount0, uint256 _amount1) = getAmountsForLiquidity(pos.liquidity, poolPrice, pos);
+    (uint256 _amount0, uint256 _amount1) = getAmountsForLiquidity(pos.liquidity, pool.price, pos);
     // withdraw liquidity
     (amount0, amount1) = nftManager.decreaseLiquidity(
       INonfungiblePositionManager.DecreaseLiquidityParams({
@@ -308,19 +338,18 @@ contract UniswapPositionManager {
    * @dev Creates the NFT token representing the pool position
    * @dev Mint initial liquidity
    */
-  //todo replace Position with Pool
   function createPosition(
     uint256 amount0,
     uint256 amount1,
-    Position memory pos,
+    Pool memory pool,
     int24 newTickLower,
     int24 newTickUpper
   ) private returns (Position memory) {
     (uint _tokenId, , , ) = nftManager.mint(
       INonfungiblePositionManager.MintParams({
-        token0: pos.token0,
-        token1: pos.token1,
-        fee: pos.fee,
+        token0: pool.token0,
+        token1: pool.token1,
+        fee: pool.fee,
         tickLower: newTickLower,
         tickUpper: newTickUpper,
         amount0Desired: amount0,
@@ -351,31 +380,29 @@ contract UniswapPositionManager {
   /**
    * Approve NFT Manager for deposits
    */
-  //todo replace with Pool
-  function approveNftManager(Position memory pos) private {
-    if (IERC20(pos.token0).allowance(address(this), address(nftManager)) == 0) {
-      IERC20(pos.token0).safeApprove(address(nftManager), type(uint256).max);
+  function approveNftManager(Pool memory pool) private {
+    if (IERC20(pool.token0).allowance(address(this), address(nftManager)) == 0) {
+      IERC20(pool.token0).safeApprove(address(nftManager), type(uint256).max);
     }
 
-    if (IERC20(pos.token1).allowance(address(this), address(nftManager)) == 0) {
-      IERC20(pos.token1).safeApprove(address(nftManager), type(uint256).max);
+    if (IERC20(pool.token1).allowance(address(this), address(nftManager)) == 0) {
+      IERC20(pool.token1).safeApprove(address(nftManager), type(uint256).max);
     }
   }
 
   /**
    * Approve assets for swaps
    */
-  //todo replace with Pool
-  function approveSwap(Position memory pos) private {
+  function approveSwap(Pool memory pool) private {
     if (
-      IERC20(pos.token0).allowance(address(this), address(exchange)) == 0
+      IERC20(pool.token0).allowance(address(this), address(exchange)) == 0
     ) {
-      IERC20(pos.token0).safeApprove(exchange, type(uint256).max);
+      IERC20(pool.token0).safeApprove(exchange, type(uint256).max);
     }
     if (
-      IERC20(pos.token1).allowance(address(this), address(exchange)) == 0
+      IERC20(pool.token1).allowance(address(this), address(exchange)) == 0
     ) {
-      IERC20(pos.token1).safeApprove(exchange, type(uint256).max);
+      IERC20(pool.token1).safeApprove(exchange, type(uint256).max);
     }
   }
 
@@ -400,7 +427,7 @@ contract UniswapPositionManager {
   function getStakedTokenBalances(
     uint160 poolPrice,
     Position memory pos
-  ) internal view returns (uint256 amount0, uint256 amount1) {
+  ) internal pure returns (uint256 amount0, uint256 amount1) {
     (amount0, amount1) = getAmountsForLiquidity(
       pos.liquidity,
       poolPrice,
