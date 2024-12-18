@@ -501,6 +501,16 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
     }
 
     /**
+      * @dev Get a pool's price from position id
+      * @param positionId the position id
+      */
+    function getPoolPrice(
+        uint256 positionId
+    ) external view returns (uint160 price) {
+        return getPoolPriceFromAddress(getPoolAddress(readPosition(positionId)));
+    }
+
+    /**
      * @dev Get a pool's price from pool address
      * @param _pool the pool address
      */
