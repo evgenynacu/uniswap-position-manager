@@ -372,7 +372,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         require(success, "Swap call failed");
     }
 
-    function _calculateValue(Pool memory pool) private returns (uint token0Balance, uint token1Balance, uint value) {
+    function _calculateValue(Pool memory pool) private view returns (uint token0Balance, uint token1Balance, uint value) {
         token0Balance = IERC20(pool.token0).balanceOf(address(this));
         token1Balance = IERC20(pool.token1).balanceOf(address(this));
         if (mainSide == Side.TOKEN1) {
