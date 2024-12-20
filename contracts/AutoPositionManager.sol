@@ -12,7 +12,6 @@ import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Factory.sol";
 import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import "@uniswap/v3-periphery/contracts/interfaces/INonfungiblePositionManager.sol";
-import "@uniswap/v3-periphery/contracts/interfaces/IQuoter.sol";
 import "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
 
 contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiver {
@@ -26,6 +25,8 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         uint256 indexed newPositionId,
         uint256 startValue,
         uint256 endValue,
+        uint256 collected0,
+        uint256 collected1,
         uint160 poolPrice,
         int loss
     );
@@ -69,7 +70,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
 
     INonfungiblePositionManager public nftManager;
     IUniswapV3Factory public uniswapFactory;
-    IQuoter public quoter;
+    address public quoter;
 
     // ----- configuration of the Vault, usually should not be changed during the operation ----- //
 
@@ -102,7 +103,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
     function __AutoPositionManager_init(
         INonfungiblePositionManager _nftManager,
         IUniswapV3Factory _uniswapFactory,
-        IQuoter _quoter,
+        address _quoter,
         uint256 _width,
         uint _minShare,
         uint _maxShare,
@@ -116,7 +117,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
     function __AutoPositionManager_init_unchained(
         INonfungiblePositionManager _nftManager,
         IUniswapV3Factory _uniswapFactory,
-        IQuoter _quoter,
+        address _quoter,
         uint256 _width,
         uint _minShare,
         uint _maxShare,
@@ -175,7 +176,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         Pool memory pool = _readPool(pos);
 
         // withdraw entire liquidity from the position
-        _withdrawPositionWithFees(pool, pos);
+        (uint collected0, uint collected1,,) = _withdrawPositionWithFees(pool, pos);
 
         // burn current position NFT
         _burn(pos.id);
@@ -198,7 +199,9 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         Position memory newPos = _estimateAndCreatePosition(pool, params);
         positionId = newPos.id;
 
-        emitRepositioned(pool.price, pos, newPos, startValue, endValue, loss);
+        emitRepositioned(pool.price, pos, newPos, startValue, endValue, collected0, collected1, loss);
+
+        //todo check if not much of tokens left on the contract
     }
 
     function setMaxLoss(int _maxLoss) external onlyOwner {
@@ -213,6 +216,8 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         Position memory newPos,
         uint startValue,
         uint endValue,
+        uint collected0,
+        uint collected1,
         int loss
     ) internal {
         emit Repositioned(
@@ -220,13 +225,15 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
             newPos.id,
             startValue,
             endValue,
+            collected0,
+            collected1,
             poolPrice,
             loss
         );
     }
 
     function _verifyLoss(int256 startValue, int256 endValue) internal view returns (int256 loss) {
-        loss = (startValue - endValue) / startValue * 1000000;
+        loss = 1000000 * (startValue - endValue) / startValue;
         require(loss <= maxLoss, "LossExceeds!"); //todo check if this actually works
     }
 
@@ -369,17 +376,9 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         token0Balance = IERC20(pool.token0).balanceOf(address(this));
         token1Balance = IERC20(pool.token1).balanceOf(address(this));
         if (mainSide == Side.TOKEN1) {
-            if (token0Balance == 0) {
-                value = token1Balance;
-            } else {
-                value = token1Balance + quoter.quoteExactInputSingle(pool.token0, pool.token1, pool.fee, token0Balance, 0);
-            }
+            value = calculateValueInToken1(token0Balance, token1Balance, pool.price);
         } else {
-            if (token1Balance == 0) {
-                value = token0Balance;
-            } else {
-                value = token0Balance + quoter.quoteExactInputSingle(pool.token1, pool.token0, pool.fee, token1Balance, 0);
-            }
+            revert("side token0 not supported yet");
         }
     }
 
@@ -389,9 +388,10 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
     function _withdrawPositionWithFees(
         Pool memory pool,
         Position memory pos
-    ) private returns (uint256 _amount0, uint256 _amount1) {
-        (_amount0, _amount1) = _withdrawPositionFully(pool, pos);
-        _collectFees(type(uint128).max, type(uint128).max, pos.id);
+    ) private returns (uint256 _collected0, uint256 _collected1, uint256 _amount0, uint256 _amount1) {
+        (_collected0, _collected1) = _collect(type(uint128).max, type(uint128).max, pos.id);
+        (_amount0, _amount1) = _decreasePositionLiquidity(pool, pos);
+        _collect(uint128(_amount0), uint128(_amount1), pos.id);
     }
 
     /**
@@ -399,7 +399,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
      * @return amount0 token0 amount unstaked
      * @return amount1 token1 amount unstaked
      */
-    function _withdrawPositionFully(
+    function _decreasePositionLiquidity(
         Pool memory pool,
         Position memory pos
     ) private returns (uint256 amount0, uint256 amount1) {
@@ -460,7 +460,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
     /**
      *  @dev Collect token amounts from pool position
      */
-    function _collectFees(
+    function _collect(
         uint128 _amount0,
         uint128 _amount1,
         uint256 _positionId
@@ -613,13 +613,24 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
 
     // ----- read state ----- //
 
-    function readState() external view returns (Position memory pos, Pool memory pool, uint decimals0, uint decimals1, uint staked0, uint staked1) {
+    function readState() external view returns (Position memory pos, Pool memory pool, uint decimals0, uint decimals1, uint staked0, uint staked1, uint balance0, uint balance1) {
         pos = readPosition(positionId);
         pool = _readPool(pos);
         decimals0 = ERC20(pool.token0).decimals();
         decimals1 = ERC20(pool.token1).decimals();
 
         (staked0, staked1) = _getStakedTokenBalances(pool.price, pos);
+        balance0 = ERC20(pool.token0).balanceOf(address(this));
+        balance1 = ERC20(pool.token1).balanceOf(address(this));
+    }
+
+    function calculateValueInToken1(
+        uint256 amount0,
+        uint256 amount1,
+        uint160 sqrtPriceX96
+    ) public pure returns (uint256 valueInToken1) {
+        uint256 valueToken0InToken1 = amount0 * sqrtPriceX96 * sqrtPriceX96 / 2 ** 192;
+        valueInToken1 = valueToken0InToken1 + amount1;
     }
 
     /**

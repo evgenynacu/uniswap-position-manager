@@ -46,12 +46,6 @@ const config: HardhatUserConfig = {
         // enabled: true,
       }
     },
-    // mainnet: {
-    //   accounts: [adminPrivateKey],
-    //   gasPrice: 50 * 10 ** 9, // 50 gwei
-    //   url: alchemy.mainnet + alchemyKey,
-    //   timeout: 200000,
-    // },
     polygon: {
       accounts: [process.env.ADMIN_PRIVATE_KEY],
       url: alchemy.polygon + alchemyKey,
@@ -59,7 +53,7 @@ const config: HardhatUserConfig = {
     },
     arbitrum: {
       accounts: [process.env.ADMIN_PRIVATE_KEY],
-      url: alchemy.arbitrum + alchemyKey,
+      url: "https://arbitrum.llamarpc.com",
       // timeout: 200000,
     },
     optimism: {
