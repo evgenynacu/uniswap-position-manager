@@ -56,6 +56,12 @@ const config: HardhatUserConfig = {
       url: "https://arbitrum.llamarpc.com",
       // timeout: 200000,
     },
+    arbitrum2: {
+      accounts: [process.env.ADMIN_PRIVATE_KEY],
+      url: "https://arbitrum.llamarpc.com",
+      chainId: 42161,
+      // timeout: 200000,
+    },
     optimism: {
       accounts: [process.env.ADMIN_PRIVATE_KEY],
       // gasPrice: 5 * 10 ** 9, // 5 gwei

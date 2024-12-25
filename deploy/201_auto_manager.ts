@@ -21,7 +21,7 @@ const func: DeployFunction = async function (hre: HardhatRuntimeEnvironment) {
 			execute: {
 				init: {
 					methodName: "__AutoPositionManager_init",
-					args: [nftManagerAddress, uniFactoryAddress, quoterAddress, 10100, 500, 9500, 1, 0],
+					args: [nftManagerAddress, uniFactoryAddress, quoterAddress, 10050, 500, 9500, 1, 1000],
 				},
 			}
 		},

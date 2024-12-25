@@ -169,7 +169,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         return this.onERC721Received.selector;
     }
 
-    function reposition(RepositionParams calldata params) external onlyOperator {
+    function reposition(RepositionParams calldata params) external onlyOperator returns (int256 loss) {
         Position memory pos = readPosition(positionId);
         _verifyPositionAndParams(params, pos);
 
@@ -193,7 +193,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         }
 
         (,, uint endValue) = _calculateValue(pool);
-        int loss = _verifyLoss(SafeCast.toInt256(startValue), SafeCast.toInt256(endValue));
+        loss = _verifyLoss(SafeCast.toInt256(startValue), SafeCast.toInt256(endValue));
 
         _approveNftManager(pool);
         Position memory newPos = _estimateAndCreatePosition(pool, params);
@@ -234,7 +234,7 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
 
     function _verifyLoss(int256 startValue, int256 endValue) internal view returns (int256 loss) {
         loss = 1000000 * (startValue - endValue) / startValue;
-        require(loss <= maxLoss, "LossExceeds!"); //todo check if this actually works
+        require(loss <= maxLoss, "LossExceeds!");
     }
 
     function _estimateAndCreatePosition(
@@ -367,9 +367,10 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
      * @param _swapData - Swap calldata, generated off-chain
      */
     function _exchange(address exchange, bytes memory _swapData) private {
-        (bool success,) = exchange.call(_swapData);
-
-        require(success, "Swap call failed");
+        (bool success, bytes memory response) = exchange.call(_swapData);
+        if (!success) {
+            revert(abi.decode(response, (string)));
+        }
     }
 
     function _calculateValue(Pool memory pool) private view returns (uint token0Balance, uint token1Balance, uint value) {
