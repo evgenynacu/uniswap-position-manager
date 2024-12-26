@@ -614,7 +614,8 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
 
     // ----- read state ----- //
 
-    function readState() external view returns (Position memory pos, Pool memory pool, uint decimals0, uint decimals1, uint staked0, uint staked1, uint balance0, uint balance1) {
+    function readState() external returns (Position memory pos, Pool memory pool, uint decimals0, uint decimals1, uint staked0, uint staked1, uint balance0, uint balance1, uint fees0, uint fees1) {
+        require(_msgSender() == address(this));
         pos = readPosition(positionId);
         pool = _readPool(pos);
         decimals0 = ERC20(pool.token0).decimals();
@@ -623,6 +624,9 @@ contract AutoPositionManager is Initializable, ContextUpgradeable, IERC721Receiv
         (staked0, staked1) = _getStakedTokenBalances(pool.price, pos);
         balance0 = ERC20(pool.token0).balanceOf(address(this));
         balance1 = ERC20(pool.token1).balanceOf(address(this));
+
+        // Get uncollected fees
+        (fees0, fees1) = _collect(type(uint128).max, type(uint128).max, pos.id);
     }
 
     function calculateValueInToken1(

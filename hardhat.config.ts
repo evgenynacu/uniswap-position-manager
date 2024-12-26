@@ -53,12 +53,12 @@ const config: HardhatUserConfig = {
     },
     arbitrum: {
       accounts: [process.env.ADMIN_PRIVATE_KEY],
-      url: "https://arbitrum.llamarpc.com",
+      url: "https://arbitrum.drpc.org",
       // timeout: 200000,
     },
     arbitrum2: {
       accounts: [process.env.ADMIN_PRIVATE_KEY],
-      url: "https://arbitrum.llamarpc.com",
+      url: "https://arbitrum.drpc.org",
       chainId: 42161,
       // timeout: 200000,
     },
